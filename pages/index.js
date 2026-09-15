@@ -59,9 +59,9 @@ export default function Home() {
     [token]
   );
 
-  const loadReminders = useCallback(async () => {
+  const loadReminders = useCallback(async (opts = {}) => {
     if (!token) return;
-    setLoading(true);
+    if (!opts.silent) setLoading(true);
     setError('');
     try {
       const res = await fetch('/api/reminders', { headers: authHeaders() });
@@ -74,14 +74,33 @@ export default function Home() {
       const data = await res.json();
       setReminders(data.reminders || []);
     } catch (e) {
-      setError('Could not reach the server.');
+      if (!opts.silent) setError('Could not reach the server.');
     } finally {
-      setLoading(false);
+      if (!opts.silent) setLoading(false);
     }
   }, [token, authHeaders]);
 
   useEffect(() => {
     if (token) loadReminders();
+  }, [token, loadReminders]);
+
+  // Auto-refresh: poll in the background every few seconds so changes made
+  // elsewhere (Claude via the API, or another device) show up without a manual
+  // reload. Silent so it doesn't flash "Loading..." on every tick, and paused
+  // while the tab is hidden to avoid wasting requests.
+  useEffect(() => {
+    if (!token) return;
+    const interval = setInterval(() => {
+      if (document.visibilityState === 'visible') loadReminders({ silent: true });
+    }, 5000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') loadReminders({ silent: true });
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [token, loadReminders]);
 
   function saveToken(e) {
