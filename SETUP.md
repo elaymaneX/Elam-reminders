@@ -65,7 +65,15 @@ From then on, Claude can read what's on your list and add to it directly, and an
 
 All requests need header: `Authorization: Bearer <APP_SECRET>`
 
-- `GET /api/reminders` — list all. Add `?done=false` for only open ones.
-- `POST /api/reminders` — body: `{ "title": "...", "notes": "...", "due_at": "2026-09-20T17:00:00Z", "created_by": "claude" }` (`due_at` and `notes` optional; `due_at` omitted = no specific time, just a list item)
-- `PATCH /api/reminders/:id` — body: any of `{ title, notes, due_at, done }`
+- `GET /api/reminders` — list all. Filters: `?done=false`, `?kind=reminder` or `?kind=project`.
+- `POST /api/reminders` — body: `{ "title": "...", "notes": "...", "due_at": "2026-09-20T17:00:00Z", "created_by": "claude", "kind": "reminder" }`
+  - `notes`, `due_at`, `created_by`, `kind` are all optional. `kind` defaults to `"reminder"`; pass `"project"` for an untimed project idea (its `due_at` is forced to null regardless of what you send).
+- `PATCH /api/reminders/:id` — body: any of `{ title, notes, due_at, done, kind }`
 - `DELETE /api/reminders/:id`
+- `POST /api/reminders/:id/snooze` — body: `{ "minutes": 30 }`. Pushes `due_at` to now+minutes and clears `done`/`notified` so it fires again. This is what "snooze this for 30 mins" / "snooze for 5 hours" means for Claude to call — any number of minutes works, not just the app's 15/60/1440 quick buttons.
+
+## Snoozing from a notification (and the iOS caveat)
+
+The push notification itself carries three quick-snooze buttons (15m / 1h / Tomorrow) that call the snooze endpoint straight from the notification, no need to open the app. This works on Chrome/Android/desktop.
+
+Honest limitation: **iOS Safari does not support action buttons on web push notifications** at all — this is a long-standing Apple platform gap, not a bug in this app. On iPhone/iPad, tapping the notification just opens the app instead; there is no way around this without a native app using Apple's own push framework. Since iOS is your main use case, plan on doing quick snoozes either by asking Claude ("snooze that for 30 mins") or by opening the app and tapping the snooze buttons shown under each reminder there.

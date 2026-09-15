@@ -9,7 +9,7 @@ export default async function handler(req, res) {
   const { id } = req.query;
 
   if (req.method === 'PATCH') {
-    const allowed = ['title', 'notes', 'due_at', 'done', 'notified'];
+    const allowed = ['title', 'notes', 'due_at', 'done', 'notified', 'kind'];
     const updates = {};
     for (const key of allowed) {
       if (key in (req.body || {})) updates[key] = req.body[key];

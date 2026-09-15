@@ -1,6 +1,24 @@
 import { useEffect, useState, useCallback } from 'react';
 
 const TOKEN_KEY = 'reminders_app_secret';
+const DB_NAME = 'reminders-app';
+const STORE_NAME = 'kv';
+
+// Mirror of the token into IndexedDB, so the service worker (which can't see
+// localStorage) can also read it - needed for snooze buttons tapped directly
+// on a notification, without the app open.
+function saveTokenToIDB(token) {
+  const req = indexedDB.open(DB_NAME, 1);
+  req.onupgradeneeded = () => {
+    if (!req.result.objectStoreNames.contains(STORE_NAME)) {
+      req.result.createObjectStore(STORE_NAME);
+    }
+  };
+  req.onsuccess = () => {
+    const tx = req.result.transaction(STORE_NAME, 'readwrite');
+    tx.objectStore(STORE_NAME).put(token, 'app_secret');
+  };
+}
 
 function urlBase64ToUint8Array(base64String) {
   const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
@@ -15,23 +33,25 @@ function fmtDue(due_at) {
   return d.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
 }
 
+const SNOOZE_OPTIONS = [
+  { label: '15m', minutes: 15 },
+  { label: '1h', minutes: 60 },
+  { label: 'Tomorrow', minutes: 1440 },
+];
+
 export default function Home() {
   const [token, setToken] = useState(null);
   const [tokenInput, setTokenInput] = useState('');
   const [reminders, setReminders] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [title, setTitle] = useState('');
-  const [dueAt, setDueAt] = useState('');
+  const [tab, setTab] = useState('reminders'); // 'reminders' | 'projects' | 'account'
   const [notifStatus, setNotifStatus] = useState('unknown');
-  const [showDone, setShowDone] = useState(false);
 
   useEffect(() => {
     const saved = typeof window !== 'undefined' ? localStorage.getItem(TOKEN_KEY) : null;
     if (saved) setToken(saved);
-    if (typeof Notification !== 'undefined') {
-      setNotifStatus(Notification.permission);
-    }
+    if (typeof Notification !== 'undefined') setNotifStatus(Notification.permission);
   }, []);
 
   const authHeaders = useCallback(
@@ -66,29 +86,24 @@ export default function Home() {
 
   function saveToken(e) {
     e.preventDefault();
-    localStorage.setItem(TOKEN_KEY, tokenInput.trim());
-    setToken(tokenInput.trim());
+    const t = tokenInput.trim();
+    localStorage.setItem(TOKEN_KEY, t);
+    saveTokenToIDB(t);
+    setToken(t);
   }
 
-  async function addReminder(e) {
-    e.preventDefault();
-    if (!title.trim()) return;
+  async function createItem({ title, due_at, kind }) {
     const res = await fetch('/api/reminders', {
       method: 'POST',
       headers: authHeaders(),
-      body: JSON.stringify({
-        title: title.trim(),
-        due_at: dueAt ? new Date(dueAt).toISOString() : null,
-        created_by: 'user',
-      }),
+      body: JSON.stringify({ title, due_at: due_at || null, created_by: 'user', kind }),
     });
     if (res.ok) {
-      setTitle('');
-      setDueAt('');
       loadReminders();
-    } else {
-      setError('Could not add reminder.');
+      return true;
     }
+    setError('Could not add item.');
+    return false;
   }
 
   async function toggleDone(reminder) {
@@ -102,6 +117,15 @@ export default function Home() {
 
   async function removeReminder(id) {
     await fetch(`/api/reminders/${id}`, { method: 'DELETE', headers: authHeaders() });
+    loadReminders();
+  }
+
+  async function snooze(id, minutes) {
+    await fetch(`/api/reminders/${id}/snooze`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ minutes }),
+    });
     loadReminders();
   }
 
@@ -127,6 +151,11 @@ export default function Home() {
     }
   }
 
+  function signOut() {
+    localStorage.removeItem(TOKEN_KEY);
+    setToken(null);
+  }
+
   if (!token) {
     return (
       <main style={styles.centerScreen}>
@@ -147,20 +176,61 @@ export default function Home() {
     );
   }
 
-  const visible = reminders.filter((r) => showDone || !r.done);
+  const remindersList = reminders.filter((r) => r.kind !== 'project');
+  const projectsList = reminders.filter((r) => r.kind === 'project');
 
   return (
     <main style={styles.page}>
-      <header style={styles.header}>
-        <h1 style={styles.h1}>Reminders</h1>
-        {notifStatus !== 'granted' && (
-          <button onClick={enableNotifications} style={styles.secondaryButton}>
-            Enable notifications
-          </button>
-        )}
-      </header>
+      {error && <p style={styles.error}>{error}</p>}
+      {loading && <p style={styles.muted}>Loading...</p>}
 
-      <form onSubmit={addReminder} style={styles.addForm}>
+      {tab === 'reminders' && (
+        <RemindersTab
+          items={remindersList}
+          onAdd={(title, due_at) => createItem({ title, due_at, kind: 'reminder' })}
+          onToggle={toggleDone}
+          onDelete={removeReminder}
+          onSnooze={snooze}
+        />
+      )}
+      {tab === 'projects' && (
+        <ProjectsTab
+          items={projectsList}
+          onAdd={(title) => createItem({ title, due_at: null, kind: 'project' })}
+          onToggle={toggleDone}
+          onDelete={removeReminder}
+        />
+      )}
+      {tab === 'account' && (
+        <AccountTab notifStatus={notifStatus} onEnableNotifications={enableNotifications} onSignOut={signOut} />
+      )}
+
+      <BottomNav tab={tab} setTab={setTab} />
+    </main>
+  );
+}
+
+function RemindersTab({ items, onAdd, onToggle, onDelete, onSnooze }) {
+  const [title, setTitle] = useState('');
+  const [dueAt, setDueAt] = useState('');
+  const [showDone, setShowDone] = useState(false);
+
+  async function submit(e) {
+    e.preventDefault();
+    if (!title.trim()) return;
+    const ok = await onAdd(title.trim(), dueAt ? new Date(dueAt).toISOString() : null);
+    if (ok) {
+      setTitle('');
+      setDueAt('');
+    }
+  }
+
+  const visible = items.filter((r) => showDone || !r.done);
+
+  return (
+    <div>
+      <h1 style={styles.h1}>Reminders</h1>
+      <form onSubmit={submit} style={styles.addForm}>
         <input
           type="text"
           value={title}
@@ -168,17 +238,9 @@ export default function Home() {
           placeholder="New reminder..."
           style={styles.inputGrow}
         />
-        <input
-          type="datetime-local"
-          value={dueAt}
-          onChange={(e) => setDueAt(e.target.value)}
-          style={styles.input}
-        />
+        <input type="datetime-local" value={dueAt} onChange={(e) => setDueAt(e.target.value)} style={styles.input} />
         <button type="submit" style={styles.primaryButton}>Add</button>
       </form>
-
-      {error && <p style={styles.error}>{error}</p>}
-      {loading && <p style={styles.muted}>Loading...</p>}
 
       <label style={styles.checkboxRow}>
         <input type="checkbox" checked={showDone} onChange={(e) => setShowDone(e.target.checked)} />
@@ -186,35 +248,135 @@ export default function Home() {
       </label>
 
       <ul style={styles.list}>
-        {visible.length === 0 && !loading && <p style={styles.muted}>Nothing here.</p>}
+        {visible.length === 0 && <p style={styles.muted}>Nothing here.</p>}
         {visible.map((r) => (
           <li key={r.id} style={styles.item}>
-            <label style={styles.itemLeft}>
-              <input type="checkbox" checked={r.done} onChange={() => toggleDone(r)} />
-              <div>
-                <div style={r.done ? styles.doneTitle : styles.itemTitle}>{r.title}</div>
-                <div style={styles.itemMeta}>
-                  {fmtDue(r.due_at) || 'No due time'}
-                  {r.created_by === 'claude' ? ' · added by Claude' : ''}
+            <div style={styles.itemRow}>
+              <label style={styles.itemLeft}>
+                <input type="checkbox" checked={r.done} onChange={() => onToggle(r)} />
+                <div>
+                  <div style={r.done ? styles.doneTitle : styles.itemTitle}>{r.title}</div>
+                  <div style={styles.itemMeta}>
+                    {fmtDue(r.due_at) || 'No due time'}
+                    {r.created_by === 'claude' ? ' · added by Claude' : ''}
+                  </div>
                 </div>
+              </label>
+              <button onClick={() => onDelete(r.id)} style={styles.deleteButton}>Delete</button>
+            </div>
+            {!r.done && (
+              <div style={styles.snoozeRow}>
+                {SNOOZE_OPTIONS.map((opt) => (
+                  <button key={opt.label} onClick={() => onSnooze(r.id, opt.minutes)} style={styles.snoozeButton}>
+                    {opt.label}
+                  </button>
+                ))}
               </div>
-            </label>
-            <button onClick={() => removeReminder(r.id)} style={styles.deleteButton}>
-              Delete
-            </button>
+            )}
           </li>
         ))}
       </ul>
-    </main>
+    </div>
+  );
+}
+
+function ProjectsTab({ items, onAdd, onToggle, onDelete }) {
+  const [title, setTitle] = useState('');
+  const [showDone, setShowDone] = useState(false);
+
+  async function submit(e) {
+    e.preventDefault();
+    if (!title.trim()) return;
+    const ok = await onAdd(title.trim());
+    if (ok) setTitle('');
+  }
+
+  const visible = items.filter((r) => showDone || !r.done);
+
+  return (
+    <div>
+      <h1 style={styles.h1}>Projects</h1>
+      <p style={styles.muted}>Ideas with no deadline - things you want to build someday.</p>
+      <form onSubmit={submit} style={styles.addForm}>
+        <input
+          type="text"
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          placeholder="New project idea..."
+          style={styles.inputGrow}
+        />
+        <button type="submit" style={styles.primaryButton}>Add</button>
+      </form>
+
+      <label style={styles.checkboxRow}>
+        <input type="checkbox" checked={showDone} onChange={(e) => setShowDone(e.target.checked)} />
+        Show done
+      </label>
+
+      <ul style={styles.list}>
+        {visible.length === 0 && <p style={styles.muted}>No project ideas yet.</p>}
+        {visible.map((r) => (
+          <li key={r.id} style={styles.item}>
+            <div style={styles.itemRow}>
+              <label style={styles.itemLeft}>
+                <input type="checkbox" checked={r.done} onChange={() => onToggle(r)} />
+                <div style={r.done ? styles.doneTitle : styles.itemTitle}>{r.title}</div>
+              </label>
+              <button onClick={() => onDelete(r.id)} style={styles.deleteButton}>Delete</button>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function AccountTab({ notifStatus, onEnableNotifications, onSignOut }) {
+  return (
+    <div>
+      <h1 style={styles.h1}>Account</h1>
+      <div style={styles.accountRow}>
+        <span>Notifications</span>
+        <span style={styles.muted}>{notifStatus === 'granted' ? 'Enabled' : notifStatus}</span>
+      </div>
+      {notifStatus !== 'granted' && (
+        <button onClick={onEnableNotifications} style={styles.primaryButton}>Enable notifications</button>
+      )}
+      <div style={{ height: 24 }} />
+      <button onClick={onSignOut} style={styles.secondaryButton}>Sign out on this device</button>
+    </div>
+  );
+}
+
+function BottomNav({ tab, setTab }) {
+  const tabs = [
+    { id: 'reminders', label: 'Reminders', icon: '⏰' },
+    { id: 'projects', label: 'Projects', icon: '💡' },
+    { id: 'account', label: 'Account', icon: '👤' },
+  ];
+  return (
+    <nav style={styles.bottomNav}>
+      <div style={styles.bottomNavIsland}>
+        {tabs.map((t) => (
+          <button
+            key={t.id}
+            onClick={() => setTab(t.id)}
+            style={{ ...styles.navButton, ...(tab === t.id ? styles.navButtonActive : {}) }}
+          >
+            <span style={{ fontSize: 18 }}>{t.icon}</span>
+            <span style={{ fontSize: 11 }}>{t.label}</span>
+          </button>
+        ))}
+      </div>
+    </nav>
   );
 }
 
 const styles = {
   centerScreen: { minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 },
   tokenForm: { display: 'flex', flexDirection: 'column', gap: 12, width: '100%', maxWidth: 320 },
-  page: { maxWidth: 560, margin: '0 auto', padding: '24px 16px 80px' },
-  header: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 16 },
-  h1: { fontSize: 22, margin: 0 },
+  page: { maxWidth: 560, margin: '0 auto', padding: '24px 16px 120px' },
+  h1: { fontSize: 22, margin: '0 0 12px' },
   muted: { color: '#8b949e', fontSize: 14 },
   error: { color: '#f85149', fontSize: 14 },
   addForm: { display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 },
@@ -225,9 +387,46 @@ const styles = {
   deleteButton: { padding: '6px 10px', borderRadius: 8, border: '1px solid #30363d', background: 'transparent', color: '#f85149' },
   checkboxRow: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: '#8b949e', marginBottom: 8 },
   list: { listStyle: 'none', padding: 0, display: 'flex', flexDirection: 'column', gap: 8 },
-  item: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: 12, borderRadius: 10, background: '#161b22', border: '1px solid #30363d' },
+  item: { padding: 12, borderRadius: 10, background: '#161b22', border: '1px solid #30363d' },
+  itemRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
   itemLeft: { display: 'flex', alignItems: 'flex-start', gap: 10 },
   itemTitle: { fontSize: 15 },
   doneTitle: { fontSize: 15, textDecoration: 'line-through', color: '#8b949e' },
   itemMeta: { fontSize: 12, color: '#8b949e', marginTop: 2 },
+  snoozeRow: { display: 'flex', gap: 6, marginTop: 8, paddingLeft: 26 },
+  snoozeButton: { padding: '4px 10px', borderRadius: 999, border: '1px solid #30363d', background: '#0d1117', color: '#8b949e', fontSize: 12 },
+  accountRow: { display: 'flex', justifyContent: 'space-between', padding: '10px 0', borderBottom: '1px solid #30363d', marginBottom: 16 },
+  bottomNav: {
+    position: 'fixed',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    display: 'flex',
+    justifyContent: 'center',
+    paddingBottom: 'calc(12px + env(safe-area-inset-bottom, 0px))',
+    paddingTop: 8,
+    pointerEvents: 'none',
+  },
+  bottomNavIsland: {
+    pointerEvents: 'auto',
+    display: 'flex',
+    gap: 4,
+    background: '#161b22',
+    border: '1px solid #30363d',
+    borderRadius: 20,
+    padding: 6,
+    boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+  },
+  navButton: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: 2,
+    padding: '8px 18px',
+    borderRadius: 14,
+    border: 'none',
+    background: 'transparent',
+    color: '#8b949e',
+  },
+  navButtonActive: { background: '#0d1117', color: '#e6edf3' },
 };

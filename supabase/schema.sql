@@ -5,13 +5,17 @@ create table if not exists reminders (
   id uuid primary key default gen_random_uuid(),
   title text not null,
   notes text,
-  due_at timestamptz,               -- null = no specific time, just a list item
+  due_at timestamptz,               -- null = no specific time (always true for kind='project')
   done boolean not null default false,
   created_by text not null default 'user',   -- 'user' or 'claude'
   notified boolean not null default false,   -- whether a push has already been sent for this due_at
+  kind text not null default 'reminder' check (kind in ('reminder', 'project')),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+-- If you already ran an earlier version of this schema, apply just the new column:
+-- alter table reminders add column if not exists kind text not null default 'reminder' check (kind in ('reminder', 'project'));
 
 create table if not exists push_subscriptions (
   id uuid primary key default gen_random_uuid(),
