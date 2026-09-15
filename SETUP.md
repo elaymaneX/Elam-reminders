@@ -45,7 +45,29 @@ Open http://localhost:3000, enter your `APP_SECRET` as the access code, and try 
 1. Push this project to a GitHub repo (or `vercel` CLI can deploy straight from the folder).
 2. In Vercel, import the project.
 3. In the Vercel project's **Settings -> Environment Variables**, add every variable from `.env.local` (same names, same values) for the Production environment.
-4. Deploy. Vercel will also automatically pick up the cron job defined in `vercel.json` (checks for due reminders every 5 minutes) — no extra setup needed, though Vercel Cron on the free (Hobby) plan currently allows a minimum interval, so if it's rejected, change `*/5 * * * *` in `vercel.json` to `0 * * * *` (hourly) or check your plan's minimum.
+4. Deploy.
+
+Note: this app does NOT use Vercel Cron — the free (Hobby) plan only allows once-a-day schedules, too infrequent for timely reminders. Instead, Supabase's own scheduler (`pg_cron` + `pg_net`, both free) calls the app's `/api/push/send-due` endpoint every 5 minutes directly from the database. Set that up in step 4.5 below, once you know your deployed Vercel URL.
+
+## 4.5. Schedule the due-reminder check (Supabase pg_cron)
+
+1. In Supabase, go to **Database -> Extensions**, and enable `pg_cron` and `pg_net` (search for each, toggle on).
+2. Go to **SQL Editor -> New query** and run this, with your real Vercel URL and `APP_SECRET` substituted in:
+
+```sql
+select cron.schedule(
+  'send-due-reminders',
+  '*/5 * * * *',
+  $$
+  select net.http_post(
+    url := 'https://YOUR-APP.vercel.app/api/push/send-due',
+    headers := '{"Content-Type": "application/json", "Authorization": "Bearer YOUR_APP_SECRET"}'::jsonb
+  );
+  $$
+);
+```
+
+That's it — Supabase will hit the endpoint every 5 minutes forever, independent of Vercel's plan limits. To check it's firing: **Database -> Cron Jobs** in Supabase shows run history. To stop/change it later: `select cron.unschedule('send-due-reminders');` then re-run `cron.schedule` with new values.
 
 ## 5. Install on iPhone/iPad
 1. Open the deployed Vercel URL in **Safari** (must be Safari, not Chrome, for iOS install to work).
